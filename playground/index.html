@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Liveness SDK · Playground</title>
+
+    <!--
+      Resolve the bare "@mediapipe/tasks-vision" import (kept external in the
+      SDK build) to the CDN ESM bundle. The local SDK is imported from ../dist.
+      Run `npm run build` (or `npm run dev`) first so ../dist exists.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs"
+        }
+      }
+    </script>
+
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0f1115;
+        --panel: #171a21;
+        --panel-2: #1f232c;
+        --text: #e7eaf0;
+        --muted: #8b93a3;
+        --accent: #4f8cff;
+        --ok: #3ecf8e;
+        --warn: #ffb020;
+        --err: #ff5c5c;
+        --border: #2a2f3a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+      }
+      header h1 { font-size: 16px; margin: 0; }
+      header .tag { color: var(--muted); font-size: 12px; }
+      main {
+        display: grid;
+        grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+        gap: 20px;
+        padding: 20px;
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+      @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+      }
+      .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
+
+      .stage {
+        position: relative;
+        aspect-ratio: 4 / 3;
+        background: #000;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      /* Mirror the preview for a natural selfie feel (display-only). */
+      #video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+      #overlay {
+        position: absolute; inset: 0;
+        display: flex; align-items: flex-end; justify-content: center;
+        padding: 14px; pointer-events: none;
+      }
+      #hint {
+        background: rgba(0,0,0,.6); backdrop-filter: blur(4px);
+        padding: 8px 14px; border-radius: 999px; font-weight: 600;
+        max-width: 90%; text-align: center;
+      }
+      #phasePill {
+        position: absolute; top: 12px; left: 12px;
+        background: rgba(0,0,0,.6); padding: 4px 10px; border-radius: 999px;
+        font-size: 12px; color: var(--accent); font-weight: 600;
+      }
+
+      .controls { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+      button {
+        appearance: none; border: 1px solid var(--border);
+        background: var(--panel-2); color: var(--text);
+        padding: 9px 16px; border-radius: 8px; font-weight: 600; cursor: pointer;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+
+      .config { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; align-items: center; margin-top: 14px; }
+      .config label { color: var(--muted); }
+      .config input { width: 90px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 5px 8px; }
+
+      .metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+      .metric { background: var(--panel-2); border-radius: 8px; padding: 10px 12px; }
+      .metric .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+      .metric .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+      .metric.ok .v { color: var(--ok); }
+      .metric.bad .v { color: var(--err); }
+
+      .challenges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+      .chip {
+        padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+        background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+      }
+      .chip.active { border-color: var(--accent); color: var(--accent); }
+      .chip.done { border-color: var(--ok); color: var(--ok); }
+
+      #refThumb { width: 100%; border-radius: 8px; border: 1px solid var(--border); display: none; }
+
+      #log {
+        height: 180px; overflow: auto; background: #0b0d11; border: 1px solid var(--border);
+        border-radius: 8px; padding: 10px; font: 12px/1.5 ui-monospace, Menlo, monospace;
+        color: var(--muted); white-space: pre-wrap;
+      }
+      #payload {
+        max-height: 260px; overflow: auto; background: #0b0d11; border: 1px solid var(--border);
+        border-radius: 8px; padding: 10px; font: 12px/1.5 ui-monospace, Menlo, monospace;
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .row-span { grid-column: 1 / -1; }
+      .banner { background: #2a1414; border: 1px solid var(--err); color: #ffb4b4; padding: 10px 14px; border-radius: 8px; margin: 0 20px; display: none; }
+      code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>Liveness SDK Playground</h1>
+      <span class="tag">@netrilis/liveness-web-client · local test harness</span>
+    </header>
+
+    <div id="banner" class="banner"></div>
+
+    <main>
+      <!-- Left: camera + controls -->
+      <section class="card">
+        <h2>Camera</h2>
+        <div class="stage">
+          <video id="video" autoplay playsinline muted></video>
+          <div id="phasePill">idle</div>
+          <div id="overlay"><div id="hint">Press Start</div></div>
+        </div>
+        <!-- Hidden working surface used by the SDK for crops + snapshots -->
+        <canvas id="canvas" hidden></canvas>
+
+        <div class="controls">
+          <button id="startBtn" class="primary">Start</button>
+          <button id="abortBtn" disabled>Abort</button>
+          <button id="resetBtn" disabled>Reset</button>
+        </div>
+
+        <div class="config">
+          <label for="cfgCount">Challenge count</label>
+          <input id="cfgCount" type="number" min="1" max="5" value="3" />
+          <label for="cfgTimeout">Timeout (ms)</label>
+          <input id="cfgTimeout" type="number" min="0" step="5000" value="60000" />
+          <label for="cfgBlur">Blur variance floor</label>
+          <input id="cfgBlur" type="number" min="0" value="100" />
+        </div>
+      </section>
+
+      <!-- Right: live state -->
+      <section class="card">
+        <h2>Live state</h2>
+        <div class="challenges" id="challengeChips"></div>
+        <div class="metrics">
+          <div class="metric" id="mBlur"><div class="k">Blur variance</div><div class="v">—</div></div>
+          <div class="metric" id="mBright"><div class="k">Brightness</div><div class="v">—</div></div>
+          <div class="metric" id="mFace"><div class="k">Face</div><div class="v">—</div></div>
+          <div class="metric" id="mCenter"><div class="k">Centered</div><div class="v">—</div></div>
+        </div>
+        <h2 style="margin-top:16px">Reference photo</h2>
+        <img id="refThumb" alt="reference capture" />
+        <p id="refNote" style="color:var(--muted);margin:6px 0 0">Captured automatically on alignment.</p>
+      </section>
+
+      <!-- Bottom: log + payload -->
+      <section class="card row-span" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <h2>Event log</h2>
+          <div id="log"></div>
+        </div>
+        <div>
+          <h2>Session payload</h2>
+          <div id="payload">—</div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
