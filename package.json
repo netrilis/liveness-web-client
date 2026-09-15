@@ -1,5 +1,5 @@
 {
-  "name": "@netrilis/liveness-web-client",
+  "name": "ntrls-liveness-web-client",
   "version": "0.1.1-alpha.1",
   "description": "Framework-agnostic client-side liveness detection SDK (reference capture, image quality pre-filtering, MediaPipe active challenges).",
   "type": "module",
