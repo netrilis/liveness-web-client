@@ -16,8 +16,13 @@ const els = {
   phasePill: $("phasePill"),
   hint: $("hint"),
   startBtn: $("startBtn"),
+  captureBtn: $("captureBtn"),
+  challengeBtn: $("challengeBtn"),
   abortBtn: $("abortBtn"),
   resetBtn: $("resetBtn"),
+  cfgMode: $("cfgMode"),
+  cfgDelay: $("cfgDelay"),
+  cfgAutoStart: $("cfgAutoStart"),
   cfgCount: $("cfgCount"),
   cfgTimeout: $("cfgTimeout"),
   cfgBlur: $("cfgBlur"),
@@ -69,7 +74,18 @@ function setRunning(running) {
   els.startBtn.disabled = running;
   els.abortBtn.disabled = !running;
   els.resetBtn.disabled = running;
-  [els.cfgCount, els.cfgTimeout, els.cfgBlur].forEach((i) => (i.disabled = running));
+  [
+    els.cfgMode,
+    els.cfgDelay,
+    els.cfgAutoStart,
+    els.cfgCount,
+    els.cfgTimeout,
+    els.cfgBlur,
+  ].forEach((i) => (i.disabled = running));
+  if (!running) {
+    els.captureBtn.disabled = true;
+    els.challengeBtn.disabled = true;
+  }
 }
 
 async function start() {
@@ -78,10 +94,17 @@ async function start() {
   els.payload.textContent = "—";
   els.refThumb.style.display = "none";
 
+  const mode = els.cfgMode.value; // "auto" | "manual"
   const config = {
     challengeCount: Number(els.cfgCount.value) || 3,
     timeoutMs: Number(els.cfgTimeout.value) || 0,
-    thresholds: { blurVariance: Number(els.cfgBlur.value) || 100 },
+    thresholds: { blurVariance: Number(els.cfgBlur.value) || 100, faceScaleMin: 0.2 },
+    referenceCapture: {
+      mode,
+      delayMs: Number(els.cfgDelay.value) || 0,
+      requireHold: true,
+    },
+    autoStartChallenges: els.cfgAutoStart.checked,
     // Uses public CDN assets by default (DEFAULT_ASSETS). Self-host in prod.
     landmarker: {
       wasmBasePath: DEFAULT_ASSETS.wasmBasePath,
@@ -94,20 +117,54 @@ async function start() {
   detector.on("phase", (p) => {
     els.phasePill.textContent = p;
     log(`phase → ${p}`);
+    // Manual capture is only offered while holding alignment.
+    if (p !== "aligned") els.captureBtn.disabled = true;
+    // Manual challenge start is offered once the reference is captured.
+    els.challengeBtn.disabled = p !== "awaiting-challenge-start";
   });
 
   detector.on("alignment", (a) => {
-    els.hint.textContent = a.hint;
+    // In the "aligned" phase, the manual-capture button tracks whether the
+    // face is still aligned right now (requireHold gate).
+    if (detector.getPhase() === "aligned" && mode === "manual") {
+      els.captureBtn.disabled = !detector.isAligned();
+      els.hint.textContent = detector.isAligned()
+        ? "Hold still — press Capture when ready"
+        : a.hint;
+    } else {
+      els.hint.textContent = a.hint;
+    }
     setMetric(els.mBlur, a.metrics.blurVariance.toFixed(1), a.metrics.blurVariance >= config.thresholds.blurVariance);
     setMetric(els.mBright, a.metrics.brightness.toFixed(0), a.metrics.brightness >= 40 && a.metrics.brightness <= 210);
     setMetric(els.mFace, a.scaleOk ? "in range" : "adjust", a.scaleOk);
     setMetric(els.mCenter, a.centered ? "yes" : "no", a.centered);
   });
 
+  detector.on("align-ready", ({ mode: m, delayMs }) => {
+    log("align-ready", { mode: m, delayMs });
+    if (m === "manual") {
+      els.captureBtn.disabled = !detector.isAligned();
+      els.hint.textContent = "Aligned — press Capture when ready";
+    }
+  });
+
+  detector.on("capture-countdown", ({ remainingMs }) => {
+    if (remainingMs > 0) {
+      els.hint.textContent = `Hold still… capturing in ${(remainingMs / 1000).toFixed(1)}s`;
+    }
+  });
+
   detector.on("reference-captured", ({ image, metrics }) => {
+    els.captureBtn.disabled = true;
     els.refThumb.src = image;
     els.refThumb.style.display = "block";
     log("reference captured", { blurVariance: +metrics.blurVariance.toFixed(1), brightness: +metrics.brightness.toFixed(0) });
+  });
+
+  detector.on("awaiting-challenge-start", ({ challenges }) => {
+    renderChips(challenges, -1, 0);
+    els.hint.textContent = "Reference captured — press Start challenges";
+    log("awaiting challenge start", { challenges });
   });
 
   let queue = [];
@@ -167,6 +224,8 @@ function reset() {
   els.payload.textContent = "—";
   els.chips.innerHTML = "";
   ["mBlur", "mBright", "mFace", "mCenter"].forEach((k) => setMetric(els[k], "—", undefined));
+  els.captureBtn.disabled = true;
+  els.challengeBtn.disabled = true;
   els.resetBtn.disabled = true;
 }
 
@@ -178,6 +237,12 @@ function cleanup() {
 }
 
 els.startBtn.addEventListener("click", start);
+els.captureBtn.addEventListener("click", () => {
+  if (detector?.captureReference()) els.captureBtn.disabled = true;
+});
+els.challengeBtn.addEventListener("click", () => {
+  if (detector?.beginChallenges()) els.challengeBtn.disabled = true;
+});
 els.abortBtn.addEventListener("click", () => detector?.abort());
 els.resetBtn.addEventListener("click", reset);
 window.addEventListener("beforeunload", cleanup);

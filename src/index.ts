@@ -46,6 +46,7 @@ export type { ChallengeInput } from "./core/challenges/index.js";
 export { LivenessError } from "./core/types.js";
 export type {
   ChallengeType,
+  CaptureMode,
   Blendshapes,
   QualityMetrics,
   LivenessEvent,

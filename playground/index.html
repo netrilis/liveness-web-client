@@ -102,7 +102,8 @@
 
       .config { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; align-items: center; margin-top: 14px; }
       .config label { color: var(--muted); }
-      .config input { width: 90px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 5px 8px; }
+      .config input, .config select { width: 130px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 5px 8px; }
+      .config input[type="checkbox"] { width: auto; justify-self: start; }
 
       .metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
       .metric { background: var(--panel-2); border-radius: 8px; padding: 10px 12px; }
@@ -159,11 +160,22 @@
 
         <div class="controls">
           <button id="startBtn" class="primary">Start</button>
+          <button id="captureBtn" disabled>Capture now</button>
+          <button id="challengeBtn" disabled>Start challenges</button>
           <button id="abortBtn" disabled>Abort</button>
           <button id="resetBtn" disabled>Reset</button>
         </div>
 
         <div class="config">
+          <label for="cfgMode">Capture mode</label>
+          <select id="cfgMode">
+            <option value="auto" selected>auto (countdown)</option>
+            <option value="manual">manual (button)</option>
+          </select>
+          <label for="cfgDelay">Capture delay (ms)</label>
+          <input id="cfgDelay" type="number" min="0" step="500" value="2000" />
+          <label for="cfgAutoStart">Auto-start challenges</label>
+          <input id="cfgAutoStart" type="checkbox" />
           <label for="cfgCount">Challenge count</label>
           <input id="cfgCount" type="number" min="1" max="5" value="3" />
           <label for="cfgTimeout">Timeout (ms)</label>

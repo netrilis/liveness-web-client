@@ -28,6 +28,7 @@ import { createSessionId } from "./utils/id.js";
 import {
   LivenessError,
   type AlignmentState,
+  type CaptureMode,
   type ChallengeType,
   type LivenessEvent,
   type LivenessEventMap,
@@ -52,6 +53,36 @@ export interface LivenessDetectorConfig {
   timeoutMs?: number;
   /** Reference image encoding. */
   referenceImage?: { type?: string; quality?: number };
+  /**
+   * Controls when the reference photo is taken once alignment is stable —
+   * so the capture isn't sudden and the user can prepare.
+   */
+  referenceCapture?: {
+    /**
+     * "auto" (default): capture automatically after `delayMs`.
+     * "manual": wait until {@link LivenessDetector.captureReference} is called.
+     */
+    mode?: CaptureMode;
+    /**
+     * Grace period (ms) between reaching stable alignment and the auto capture,
+     * surfaced via `align-ready` + `capture-countdown` events so the UI can show
+     * a countdown. Default 0 (immediate). Ignored in "manual" mode except that
+     * a manual capture is still only accepted once alignment is stable.
+     */
+    delayMs?: number;
+    /**
+     * When true (default), losing alignment during the delay cancels it and
+     * returns to aligning. When false, the countdown proceeds regardless.
+     */
+    requireHold?: boolean;
+  };
+  /**
+   * When true (default), challenges start automatically after the reference is
+   * captured. When false, the detector enters `awaiting-challenge-start` and
+   * waits for {@link LivenessDetector.beginChallenges} — letting the user start
+   * the challenge flow when ready.
+   */
+  autoStartChallenges?: boolean;
 }
 
 /**
@@ -59,8 +90,10 @@ export interface LivenessDetectorConfig {
  *
  * Lifecycle: construct with a <video> + <canvas>, `await init()`, then
  * `start()`. The detector drives an rAF loop: it aligns the face, captures the
- * reference photo the instant the face is centered + quality-passing, runs the
- * randomized challenge sequence, and resolves a {@link LivenessSessionPayload}.
+ * reference photo (immediately, after a countdown, or on a manual trigger —
+ * see `referenceCapture`), runs the randomized challenge sequence (auto or
+ * gated behind {@link beginChallenges}), and resolves a
+ * {@link LivenessSessionPayload}.
  *
  * The host is responsible for acquiring the camera stream and assigning it to
  * the video element (see README). This keeps the core free of any UI concern.
@@ -75,8 +108,11 @@ export class LivenessDetector {
   private readonly challengeThresholds: typeof CHALLENGE_THRESHOLDS;
   private readonly config: Required<Pick<
     LivenessDetectorConfig,
-    "challengeCount" | "challengePool" | "timeoutMs"
-  >> & { referenceImage: { type: string; quality: number } };
+    "challengeCount" | "challengePool" | "timeoutMs" | "autoStartChallenges"
+  >> & {
+    referenceImage: { type: string; quality: number };
+    capture: { mode: CaptureMode; delayMs: number; requireHold: boolean };
+  };
 
   private phase: LivenessPhase = "idle";
   private rafId: number | null = null;
@@ -86,6 +122,12 @@ export class LivenessDetector {
   private sessionId = "";
   private startedAt = 0;
   private stableFrames = 0;
+  /** performance.now() when the "aligned" phase was entered (capture gating). */
+  private alignedAt = 0;
+  /** Whether the current frame still satisfies alignment (manual-capture gate). */
+  private currentlyAligned = false;
+  /** Metrics from the most recent alignment evaluation (used at capture time). */
+  private lastAlignmentMetrics: QualityMetrics = { blurVariance: 0, brightness: 0 };
   private referenceImage = "";
   private referenceMetrics: QualityMetrics = { blurVariance: 0, brightness: 0 };
   private challengeQueue: ChallengeType[] = [];
@@ -111,9 +153,15 @@ export class LivenessDetector {
       challengeCount: config.challengeCount ?? 3,
       challengePool: config.challengePool ?? DEFAULT_CHALLENGE_POOL,
       timeoutMs: config.timeoutMs ?? 60_000,
+      autoStartChallenges: config.autoStartChallenges ?? true,
       referenceImage: {
         type: config.referenceImage?.type ?? "image/jpeg",
         quality: config.referenceImage?.quality ?? 0.92,
+      },
+      capture: {
+        mode: config.referenceCapture?.mode ?? "auto",
+        delayMs: Math.max(0, config.referenceCapture?.delayMs ?? 0),
+        requireHold: config.referenceCapture?.requireHold ?? true,
       },
     };
     this.landmarkerOptions = config.landmarker;
@@ -144,7 +192,14 @@ export class LivenessDetector {
    * challenges pass, or rejects with a {@link LivenessError}.
    */
   start(): Promise<LivenessSessionPayload> {
-    if (this.phase === "challenge" || this.phase === "aligning") {
+    const activePhases: LivenessPhase[] = [
+      "aligning",
+      "aligned",
+      "reference-captured",
+      "awaiting-challenge-start",
+      "challenge",
+    ];
+    if (activePhases.includes(this.phase)) {
       return Promise.reject(
         new LivenessError("UNKNOWN", "A session is already running."),
       );
@@ -200,6 +255,9 @@ export class LivenessDetector {
 
   private resetSessionState(): void {
     this.stableFrames = 0;
+    this.alignedAt = 0;
+    this.currentlyAligned = false;
+    this.lastAlignmentMetrics = { blurVariance: 0, brightness: 0 };
     this.referenceImage = "";
     this.referenceMetrics = { blurVariance: 0, brightness: 0 };
     this.currentChallengeIndex = 0;
@@ -261,29 +319,35 @@ export class LivenessDetector {
 
     if (this.phase === "aligning") {
       this.handleAligning(ctx, frame, landmarks);
+    } else if (this.phase === "aligned") {
+      this.handleAligned(ctx, frame, landmarks);
     } else if (this.phase === "challenge") {
       this.handleChallenge(landmarks, blendshapes);
     }
   }
 
-  private handleAligning(
+  /**
+   * Evaluate framing + quality for the current frame, emit an `alignment`
+   * event, and report whether the face is fully aligned along with its metrics.
+   */
+  private computeAlignment(
     ctx: CanvasRenderingContext2D,
     frame: { width: number; height: number },
     landmarks: NormalizedLandmark[],
-  ): void {
+  ): { aligned: boolean; metrics: QualityMetrics } {
     const box = computeFaceBox(landmarks);
 
     if (!box) {
-      this.stableFrames = 0;
+      const metrics: QualityMetrics = { blurVariance: 0, brightness: 0 };
       this.emitAlignment({
         faceDetected: false,
         centered: false,
         scaleOk: false,
         qualityOk: false,
         hint: "Position your face in the frame",
-        metrics: { blurVariance: 0, brightness: 0 },
+        metrics,
       });
-      return;
+      return { aligned: false, metrics };
     }
 
     const framing = evaluateFraming(box, this.thresholds);
@@ -305,7 +369,6 @@ export class LivenessDetector {
     const qualityOk = brightOk && sharpOk;
 
     const hint = this.alignmentHint(box, framing, brightOk, sharpOk);
-
     const aligned =
       framing.scaleOk && framing.centered && framing.insideFrame && qualityOk;
 
@@ -318,13 +381,73 @@ export class LivenessDetector {
       metrics,
     });
 
+    return { aligned, metrics };
+  }
+
+  private handleAligning(
+    ctx: CanvasRenderingContext2D,
+    frame: { width: number; height: number },
+    landmarks: NormalizedLandmark[],
+  ): void {
+    const { aligned, metrics } = this.computeAlignment(ctx, frame, landmarks);
+    this.lastAlignmentMetrics = metrics;
+    this.currentlyAligned = aligned;
+
     if (aligned) {
       this.stableFrames++;
       if (this.stableFrames >= this.thresholds.alignmentStableFrames) {
-        this.captureReference(metrics);
+        this.enterAligned();
       }
     } else {
       this.stableFrames = 0;
+    }
+  }
+
+  /** Stable alignment reached: begin the capture delay or await a manual trigger. */
+  private enterAligned(): void {
+    this.alignedAt = performance.now();
+    this.setPhase("aligned");
+    this.emitter.emit("align-ready", {
+      mode: this.config.capture.mode,
+      delayMs: this.config.capture.delayMs,
+    });
+  }
+
+  /**
+   * "aligned" phase: keep verifying the face is still aligned, then either
+   * count down to an auto capture or wait for a manual `captureReference()`.
+   */
+  private handleAligned(
+    ctx: CanvasRenderingContext2D,
+    frame: { width: number; height: number },
+    landmarks: NormalizedLandmark[],
+  ): void {
+    const { aligned, metrics } = this.computeAlignment(ctx, frame, landmarks);
+    this.lastAlignmentMetrics = metrics;
+    this.currentlyAligned = aligned;
+
+    // Lost alignment while holding -> restart the align/hold cycle.
+    if (!aligned && this.config.capture.requireHold) {
+      this.stableFrames = 0;
+      this.setPhase("aligning");
+      return;
+    }
+
+    if (this.config.capture.mode === "manual") {
+      // Host drives capture via captureReference(); nothing to do here.
+      return;
+    }
+
+    const remainingMs = Math.max(
+      0,
+      this.config.capture.delayMs - (performance.now() - this.alignedAt),
+    );
+    this.emitter.emit("capture-countdown", {
+      remainingMs,
+      totalMs: this.config.capture.delayMs,
+    });
+    if (remainingMs <= 0) {
+      this.doCaptureReference(metrics);
     }
   }
 
@@ -350,7 +473,7 @@ export class LivenessDetector {
     this.emitter.emit("alignment", state);
   }
 
-  private captureReference(metrics: QualityMetrics): void {
+  private doCaptureReference(metrics: QualityMetrics): void {
     this.referenceImage = snapshot(
       this.canvas,
       this.config.referenceImage.type,
@@ -362,13 +485,56 @@ export class LivenessDetector {
       image: this.referenceImage,
       metrics,
     });
-    this.beginChallenges();
+
+    if (this.config.autoStartChallenges) {
+      this.beginChallenges();
+    } else {
+      this.setPhase("awaiting-challenge-start");
+      this.emitter.emit("awaiting-challenge-start", {
+        challenges: [...this.challengeQueue],
+      });
+    }
   }
 
-  private beginChallenges(): void {
+  /**
+   * Trigger the reference capture manually. Valid only while in the `aligned`
+   * phase (works in both "auto" and "manual" modes, e.g. to skip a countdown).
+   * Returns false if not currently ready — when `requireHold` is set, the face
+   * must still be aligned at the moment of the call.
+   *
+   * @returns whether the capture was accepted.
+   */
+  captureReference(): boolean {
+    if (this.phase !== "aligned") return false;
+    if (this.config.capture.requireHold && !this.currentlyAligned) return false;
+    this.doCaptureReference(this.lastAlignmentMetrics);
+    return true;
+  }
+
+  /**
+   * Begin the challenge sequence. Called automatically when
+   * `autoStartChallenges` is true; otherwise the host calls this once the user
+   * is ready (valid in the `reference-captured` / `awaiting-challenge-start`
+   * phases).
+   *
+   * @returns whether the challenge flow was started.
+   */
+  beginChallenges(): boolean {
+    if (
+      this.phase !== "reference-captured" &&
+      this.phase !== "awaiting-challenge-start"
+    ) {
+      return false;
+    }
     this.currentChallengeIndex = 0;
     this.setPhase("challenge");
     this.announceChallenge();
+    return true;
+  }
+
+  /** Whether the face is currently aligned (useful to gate a "Capture" button). */
+  isAligned(): boolean {
+    return this.currentlyAligned;
   }
 
   private announceChallenge(): void {

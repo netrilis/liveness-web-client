@@ -50,10 +50,15 @@ export type LivenessPhase =
   | "idle"
   | "initializing"
   | "aligning" // waiting for a centered, quality-passing face
+  | "aligned" // alignment held; counting down or awaiting a manual capture trigger
   | "reference-captured"
+  | "awaiting-challenge-start" // reference captured; waiting for the host to begin challenges
   | "challenge" // running an active challenge
   | "completed"
   | "error";
+
+/** How the reference photo is captured once alignment is stable. */
+export type CaptureMode = "auto" | "manual";
 
 export interface AlignmentState {
   faceDetected: boolean;
@@ -86,7 +91,19 @@ export class LivenessError extends Error {
 export interface LivenessEventMap {
   phase: LivenessPhase;
   alignment: AlignmentState;
+  /**
+   * Alignment became stable. In `auto` mode a countdown to capture has begun;
+   * in `manual` mode the host should now let the user trigger the capture.
+   */
+  "align-ready": { mode: CaptureMode; delayMs: number };
+  /** Emitted each frame during an `auto` capture countdown. */
+  "capture-countdown": { remainingMs: number; totalMs: number };
   "reference-captured": { image: string; metrics: QualityMetrics };
+  /**
+   * Reference captured but challenges are gated behind a manual start.
+   * The host should call `detector.beginChallenges()` when the user is ready.
+   */
+  "awaiting-challenge-start": { challenges: ChallengeType[] };
   "challenge-start": { challenge: ChallengeType; index: number; total: number };
   "challenge-pass": LivenessEvent;
   completed: LivenessSessionPayload;
