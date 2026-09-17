@@ -87,6 +87,17 @@ new LivenessDetector(video, canvas, {
   timeoutMs: 60_000,                     // 0 disables the session timeout
   referenceImage: { type: "image/jpeg", quality: 0.92 },
 
+  // When/how the reference photo is captured once alignment is stable, so the
+  // capture isn't sudden and the user can prepare:
+  referenceCapture: {
+    mode: "auto",                        // "auto" = capture after delayMs; "manual" = wait for captureReference()
+    delayMs: 2000,                       // countdown grace period (auto); default 0 = immediate
+    requireHold: true,                   // losing alignment during the delay cancels it
+  },
+
+  // Gate the challenge flow behind an explicit user action:
+  autoStartChallenges: true,             // false => wait for detector.beginChallenges()
+
   // Quality / framing thresholds (all optional; merged over defaults):
   thresholds: {
     blurVariance: 100,                   // Laplacian variance floor (higher = sharper)
@@ -119,15 +130,60 @@ Defaults are conservative starting points — **tune against real device/lightin
 
 ---
 
+## Reference capture & challenge start
+
+By default the reference photo is captured automatically the moment alignment is
+stable, and challenges begin right after. To avoid a sudden capture and let the
+user stay in control, use either strategy:
+
+**Countdown (auto with delay)** — a grace period after alignment, with a
+countdown UI:
+
+```ts
+new LivenessDetector(video, canvas, {
+  referenceCapture: { mode: "auto", delayMs: 2000 },
+});
+
+detector.on("align-ready", () => showCountdownRing());
+detector.on("capture-countdown", ({ remainingMs }) =>
+  (ring.textContent = Math.ceil(remainingMs / 1000)),
+);
+```
+
+**Manual capture** — the user presses a button when ready:
+
+```ts
+new LivenessDetector(video, canvas, {
+  referenceCapture: { mode: "manual" },
+  autoStartChallenges: false,
+});
+
+// Enable/disable the button as the face aligns:
+detector.on("align-ready", () => (captureBtn.disabled = false));
+detector.on("alignment", () => (captureBtn.disabled = !detector.isAligned()));
+
+captureBtn.onclick = () => detector.captureReference();   // valid only while aligned
+startBtn.onclick = () => detector.beginChallenges();      // after reference-captured
+```
+
+`captureReference()` also works during an auto countdown to capture early.
+Both methods return `false` if called in the wrong phase, so they're safe to
+wire directly to buttons.
+
+---
+
 ## Events
 
 Subscribe with `detector.on(event, handler)`; it returns an unsubscribe function.
 
 | Event | Payload | Fires when |
 | --- | --- | --- |
-| `phase` | `LivenessPhase` | Lifecycle changes (`initializing` → `aligning` → `reference-captured` → `challenge` → `completed`/`error`). |
+| `phase` | `LivenessPhase` | Lifecycle changes (`initializing` → `aligning` → `aligned` → `reference-captured` → [`awaiting-challenge-start`] → `challenge` → `completed`/`error`). |
 | `alignment` | `AlignmentState` | Every processed frame during alignment — includes a `hint` string for UI. |
+| `align-ready` | `{ mode, delayMs }` | Alignment became stable; an auto countdown started, or (manual mode) the user may now trigger capture. |
+| `capture-countdown` | `{ remainingMs, totalMs }` | Each frame during an `auto` capture countdown — drive a countdown UI. |
 | `reference-captured` | `{ image, metrics }` | Reference photo captured. |
+| `awaiting-challenge-start` | `{ challenges }` | Only when `autoStartChallenges: false` — reference captured, waiting for `beginChallenges()`. |
 | `challenge-start` | `{ challenge, index, total }` | A new challenge begins. |
 | `challenge-pass` | `LivenessEvent` | The current challenge is satisfied. |
 | `completed` | `LivenessSessionPayload` | All challenges passed (also the resolved value of `start()`). |
@@ -324,6 +380,9 @@ In Nuxt 4, wrap in `<ClientOnly>` and place the MediaPipe assets in `public/medi
 - `new LivenessDetector(video, canvas, config?)`
 - `detector.init(): Promise<void>` — load the model (call once).
 - `detector.start(): Promise<LivenessSessionPayload>` — run a session.
+- `detector.captureReference(): boolean` — manually trigger the reference capture (valid in the `aligned` phase; also skips an auto countdown). Returns whether it was accepted.
+- `detector.beginChallenges(): boolean` — start the challenge flow when `autoStartChallenges: false` (valid after the reference is captured).
+- `detector.isAligned(): boolean` — whether the face is aligned right now (use to enable a "Capture" button).
 - `detector.abort(): void` — cancel a running session.
 - `detector.dispose(): void` — release the model + listeners.
 - `detector.on(event, handler): () => void`
